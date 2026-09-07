@@ -1,4 +1,5 @@
 # Binaries for programs and plugins
+bin/
 *.exe
 *.exe~
 *.dll
@@ -13,3 +14,11 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# Working files: hash lists and manifests
+*.txt
+*.csv
+*.part
+
+# Downloaded samples
+apks/
