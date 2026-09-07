@@ -128,7 +128,13 @@ func collect(ctx context.Context, svc *service.Service, query string, limit int)
 		if cursor = res.NextCursor; cursor == "" {
 			break
 		}
-		log.Printf("%d of %d collected", len(out), res.TotalCount)
+		// count is absent on some queries, so it is only shown when the API
+		// actually reported one.
+		if res.TotalCount > 0 {
+			log.Printf("%d of %d collected", len(out), res.TotalCount)
+		} else {
+			log.Printf("%d collected", len(out))
+		}
 	}
 	if len(out) > limit {
 		out = out[:limit]
