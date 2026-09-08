@@ -3,11 +3,15 @@
 //
 // Unlike AndroZoo, Koodous searches server-side: there is a query language
 // covering package name, developer, certificate, tags, size and dates, so no
-// local catalogue is needed. Downloads are two-step — an endpoint mints a link
-// that stays valid for three minutes, and the APK is fetched from that link.
+// local catalogue is needed.
+//
+// The download endpoint answers in one of two shapes: it either mints a link
+// valid for three minutes, or streams the APK itself. Both are handled.
 package koodous
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +35,9 @@ var (
 	sha1Re   = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	md5Re    = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 )
+
+// zipMagic starts every APK.
+var zipMagic = []byte{'P', 'K', 0x03, 0x04}
 
 // Apk is the metadata Koodous holds for one sample.
 type Apk struct {
@@ -225,9 +232,44 @@ func (c *Client) Matches(ctx context.Context, sha string) (json.RawMessage, erro
 	return json.RawMessage(raw), nil
 }
 
+// Download writes the APK for a sample into w, whichever shape the endpoint
+// answers in: the body is streamed when it is the APK itself, otherwise a link
+// is extracted from it and followed.
+func (c *Client) Download(ctx context.Context, sha string, w io.Writer) (int64, error) {
+	sha = strings.TrimSpace(sha)
+	if !sha256Re.MatchString(sha) {
+		return 0, fmt.Errorf("koodous download: %q is not a SHA-256", sha)
+	}
+	resp, err := c.get(ctx, "/apks/"+sha+"/download/", nil, "download")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	br := bufio.NewReader(resp.Body)
+	head, err := br.Peek(len(zipMagic))
+	if err != nil && err != io.EOF {
+		return 0, fmt.Errorf("koodous download: reading %s: %w", sha, err)
+	}
+	if bytes.Equal(head, zipMagic) {
+		return io.Copy(w, br)
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(br, 1<<20))
+	if err != nil {
+		return 0, fmt.Errorf("koodous download: reading the link for %s: %w", sha, err)
+	}
+	link, err := extractLink(raw)
+	if err != nil {
+		return 0, fmt.Errorf("koodous download: %s: %w", sha, err)
+	}
+	return c.Fetch(ctx, link, w)
+}
+
 // DownloadURL mints a temporary link for a sample. The endpoint's response
 // shape is not pinned down by the documentation, so both a JSON object and a
-// bare URL string are accepted.
+// bare URL string are accepted. Prefer Download, which also copes with the
+// endpoint streaming the APK directly.
 func (c *Client) DownloadURL(ctx context.Context, sha string) (string, error) {
 	sha = strings.TrimSpace(sha)
 	if !sha256Re.MatchString(sha) {
