@@ -143,7 +143,7 @@ func (s *Service) Matches(ctx context.Context, sha string) (ReportResult, error)
 // and only then takes its final name.
 //
 // Concurrency is modest on purpose: Koodous meters requests per account tier,
-// and each APK costs two calls — one to mint the link, one to fetch it.
+// and an APK can cost two calls — one to mint a link, one to fetch it.
 func (s *Service) Download(ctx context.Context, shas []string, dir string, workers int) (DownloadResult, error) {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		dir = s.outDir
@@ -221,14 +221,6 @@ func (s *Service) fetchOne(ctx context.Context, sha, dir string) DownloadOutcome
 		return DownloadOutcome{SHA256: sha, Path: final, Bytes: st.Size(), Status: "skipped"}
 	}
 
-	// Minted immediately before the transfer: the link expires in three
-	// minutes, so requesting them all up front would strand the tail of a
-	// long queue.
-	link, err := s.client.DownloadURL(ctx, sha)
-	if err != nil {
-		return DownloadOutcome{SHA256: sha, Status: "error", Error: err.Error()}
-	}
-
 	tmp, err := os.CreateTemp(dir, "."+sha+".part-*")
 	if err != nil {
 		return DownloadOutcome{SHA256: sha, Status: "error", Error: err.Error()}
@@ -237,7 +229,7 @@ func (s *Service) fetchOne(ctx context.Context, sha, dir string) DownloadOutcome
 	defer os.Remove(tmpName)
 
 	h := sha256.New()
-	n, err := s.client.Fetch(ctx, link, io.MultiWriter(tmp, h))
+	n, err := s.client.Download(ctx, sha, io.MultiWriter(tmp, h))
 	closeErr := tmp.Close()
 	if err != nil {
 		return DownloadOutcome{SHA256: sha, Status: "error", Error: err.Error()}
