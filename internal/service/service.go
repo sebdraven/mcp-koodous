@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,10 +44,14 @@ type SearchResult struct {
 	Note       string        `json:"note,omitempty"`
 }
 
+// ReportResult carries a Koodous report as decoded JSON. Report is typed any
+// so that the inferred MCP output schema leaves it unconstrained: a
+// json.RawMessage is a []byte and infers as "null or array of bytes", which
+// rejects the objects Koodous returns.
 type ReportResult struct {
-	SHA256    string          `json:"sha256"`
-	FetchedAt string          `json:"fetched_at"`
-	Report    json.RawMessage `json:"report"`
+	SHA256    string `json:"sha256"`
+	FetchedAt string `json:"fetched_at"`
+	Report    any    `json:"report"`
 }
 
 type DownloadOutcome struct {
@@ -126,7 +131,7 @@ func (s *Service) Analysis(ctx context.Context, sha string) (ReportResult, error
 	if err != nil {
 		return ReportResult{}, err
 	}
-	return ReportResult{SHA256: strings.ToLower(strings.TrimSpace(sha)), FetchedAt: now(), Report: raw}, nil
+	return reportResult("analysis", sha, raw)
 }
 
 // Matches returns the YARA matches recorded against a sample.
@@ -135,7 +140,25 @@ func (s *Service) Matches(ctx context.Context, sha string) (ReportResult, error)
 	if err != nil {
 		return ReportResult{}, err
 	}
-	return ReportResult{SHA256: strings.ToLower(strings.TrimSpace(sha)), FetchedAt: now(), Report: raw}, nil
+	return reportResult("matches", sha, raw)
+}
+
+func reportResult(endpoint, sha string, raw json.RawMessage) (ReportResult, error) {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber() // float64 would round integers past 2^53
+	var report any
+	err := dec.Decode(&report)
+	if err == nil {
+		if _, tail := dec.Token(); tail != io.EOF {
+			err = fmt.Errorf("trailing data after the JSON value")
+		}
+	}
+	if err != nil {
+		return ReportResult{}, fmt.Errorf("koodous %s: decoding the report for %s: %w", endpoint, sha, err)
+	}
+	return ReportResult{SHA256: sha, FetchedAt: now(), Report: report}, nil
 }
 
 // Download fetches APKs into dir, one file per SHA-256. Existing files are left
