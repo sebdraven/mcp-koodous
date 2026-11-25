@@ -218,6 +218,101 @@ func TestDownloadNeedsADirectory(t *testing.T) {
 	}
 }
 
+const (
+	analysisBody = `{"androguard": {"package_name": "com.example", "permissions": ["android.permission.SEND_SMS"]}, "cuckoo": null, "droidbox": null}`
+	matchesBody  = `{"next": null, "previous": null, "results": [{"rule": "banker_generic", "ruleset": 42}]}`
+)
+
+// reportStub answers the analysis and matches endpoints with the given bodies,
+// always with a 200.
+func reportStub(t *testing.T, analysis, matches string) *koodous.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/analysis/"):
+			fmt.Fprint(w, analysis)
+		case strings.HasSuffix(r.URL.Path, "/matches/"):
+			fmt.Fprint(w, matches)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return koodous.New("TOK", koodous.WithBaseURL(srv.URL))
+}
+
+func TestAnalysisDecodesTheReport(t *testing.T) {
+	sha := hashOf(apkA)
+	svc := New(reportStub(t, analysisBody, matchesBody), t.TempDir())
+
+	res, err := svc.Analysis(context.Background(), strings.ToUpper(sha))
+	if err != nil {
+		t.Fatalf("Analysis: %v", err)
+	}
+	if res.SHA256 != sha {
+		t.Errorf("SHA256 = %q, want %q", res.SHA256, sha)
+	}
+	report, ok := res.Report.(map[string]any)
+	if !ok {
+		t.Fatalf("Report is %T, want a decoded object", res.Report)
+	}
+	for _, k := range []string{"androguard", "cuckoo", "droidbox"} {
+		if _, ok := report[k]; !ok {
+			t.Errorf("report has no %q key: %v", k, report)
+		}
+	}
+	if _, ok := report["androguard"].(map[string]any); !ok {
+		t.Errorf("androguard is %T, want an object", report["androguard"])
+	}
+}
+
+func TestMatchesDecodesTheReport(t *testing.T) {
+	sha := hashOf(apkA)
+	svc := New(reportStub(t, analysisBody, matchesBody), t.TempDir())
+
+	res, err := svc.Matches(context.Background(), sha)
+	if err != nil {
+		t.Fatalf("Matches: %v", err)
+	}
+	report, ok := res.Report.(map[string]any)
+	if !ok {
+		t.Fatalf("Report is %T, want a decoded object", res.Report)
+	}
+	for _, k := range []string{"next", "previous", "results"} {
+		if _, ok := report[k]; !ok {
+			t.Errorf("report has no %q key: %v", k, report)
+		}
+	}
+	results, ok := report["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("results = %#v, want one match", report["results"])
+	}
+}
+
+func TestReportRejectsInvalidJSON(t *testing.T) {
+	sha := hashOf(apkA)
+	bad := "<html>502 Bad Gateway</html>"
+	svc := New(reportStub(t, bad, bad), t.TempDir())
+
+	for _, tc := range []struct {
+		endpoint string
+		call     func(context.Context, string) (ReportResult, error)
+	}{
+		{"analysis", svc.Analysis},
+		{"matches", svc.Matches},
+	} {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			res, err := tc.call(context.Background(), sha)
+			if err == nil {
+				t.Fatalf("a non-JSON body was accepted as report %#v", res.Report)
+			}
+			if !strings.Contains(err.Error(), tc.endpoint) || !strings.Contains(err.Error(), sha) {
+				t.Errorf("error = %q, want it to name the %s endpoint and %s", err, tc.endpoint, sha)
+			}
+		})
+	}
+}
+
 func TestLookupCarriesFetchTime(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `{"sha256": "%s", "package_name": "com.example"}`, hashOf(apkA))
